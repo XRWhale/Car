@@ -65,6 +65,10 @@ U8X8_SSD1306_128X64_NONAME_HW_I2C u8x8(U8X8_PIN_NONE);
 
 bool objectDetected = false;
 bool wifiReady = false;
+unsigned long lastRecognitionTime = 0;       // 마지막 인식 완료 시각
+int detectConfirmCount = 0;                  // 연속 감지 카운터
+#define RECOGNITION_COOLDOWN  3000           // 인식 후 재감지 금지 시간 (ms)
+#define DETECT_CONFIRM_COUNT  3              // 연속 N회 감지해야 트리거
 
 ///////////////////////////////////////////////////////////////////////////
 // Motor Control
@@ -216,6 +220,7 @@ bool cameraInit() {
   config.fb_count = 1;
   config.grab_mode = CAMERA_GRAB_LATEST;
   config.fb_location = CAMERA_FB_IN_DRAM;
+  config.sccb_i2c_port = 1;               // I2C_NUM_1 사용 → Wire(I2C_NUM_0) 충돌 방지
 
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
@@ -346,17 +351,30 @@ String takePhotoAndRecognize() {
 
 bool initSensor() {
   for (int attempt = 1; attempt <= 3; attempt++) {
+    Wire.end();
+    delay(100);
     Wire.begin();
     delay(100);
     Wire.setClock(100000);
+
     distSensor.setTimeout(500);
     if (distSensor.init()) {
-      distSensor.startContinuous();
-      Serial.printf("[OK] VL53L0X (restore attempt %d)\n", attempt);
+      distSensor.setSignalRateLimit(0.1);
+      distSensor.setMeasurementTimingBudget(33000);
+      distSensor.startContinuous(50);
+
+      // OLED도 같은 I2C 버스이므로 재초기화
+      u8x8.begin();
+      u8x8.setPowerSave(0);
+      u8x8.setFont(u8x8_font_chroma48medium8_r);
+
+      // 검증: 실제 읽기 테스트
+      delay(200);
+      uint16_t test = distSensor.readRangeContinuousMillimeters();
+      Serial.printf("[OK] VL53L0X (attempt %d, test: %dmm)\n", attempt, test);
       return true;
     }
     Serial.printf("[FAIL] VL53L0X restore attempt %d/3\n", attempt);
-    Wire.end();
     delay(500);
   }
   return false;
@@ -400,7 +418,9 @@ void setup() {
   for (int attempt = 1; attempt <= 3; attempt++) {
     distSensor.setTimeout(500);
     if (distSensor.init()) {
-      distSensor.startContinuous();
+      distSensor.setSignalRateLimit(0.1);
+      distSensor.setMeasurementTimingBudget(33000);
+      distSensor.startContinuous(50);
       delay(100);
       uint16_t test = distSensor.readRangeContinuousMillimeters();
       Serial.printf("[OK] VL53L0X (test: %dmm) attempt %d\n", test, attempt);
@@ -475,6 +495,7 @@ void loop() {
 
   // 범위 밖
   if (distance > 8000 || distance == 0) {
+    detectConfirmCount = 0;  // 연속 감지 끊김
     delay(50);
     return;
   }
@@ -494,6 +515,20 @@ void loop() {
   if (distance < STOP_DISTANCE) {
     // === 물체 감지! ===
     if (!objectDetected) {
+      // 쿨다운 체크: 인식 직후엔 재트리거 방지
+      if (millis() - lastRecognitionTime < RECOGNITION_COOLDOWN) {
+        delay(50);
+        return;
+      }
+
+      // 디바운싱: 연속 N회 확인
+      detectConfirmCount++;
+      if (detectConfirmCount < DETECT_CONFIRM_COUNT) {
+        delay(50);
+        return;
+      }
+      detectConfirmCount = 0;
+
       objectDetected = true;
       Serial.printf("\n>>> DETECTED at %dmm!\n", distance);
 
@@ -503,17 +538,18 @@ void loop() {
       oledShowLine(2, buf);
       oledShowLine(4, "Recognizing...");
 
-      // VL53L0X continuous 정지 (카메라가 I2C 점유할 예정)
+      // 카메라는 I2C_NUM_1(sccb_i2c_port=1)을 쓰므로
+      // Wire(I2C_NUM_0)는 끄지 않고, 레이저만 정지
       distSensor.stopContinuous();
-      Wire.end();
-      delay(50);
 
       // 사진 촬영 + API 호출 (카메라 init/deinit 포함)
       String result = takePhotoAndRecognize();
 
-      // VL53L0X 복구
-      Serial.println(">>> Restoring VL53L0X...");
-      initSensor();
+      // 레이저 재시작 (Wire/센서 재초기화 불필요)
+      distSensor.startContinuous(50);
+      delay(200);
+
+      lastRecognitionTime = millis();  // 쿨다운 시작
 
       // 결과 표시
       Serial.println(">>> Final result: " + result);
@@ -525,6 +561,7 @@ void loop() {
     }
   } else {
     // === 물체 없음 ===
+    detectConfirmCount = 0;  // 연속 감지 끊김 → 카운터 리셋
     if (objectDetected) {
       objectDetected = false;
       Serial.printf(">>> Cleared at %dmm\n", distance);
