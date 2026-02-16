@@ -147,6 +147,27 @@ void s_l(unsigned int speed) {
 }
 
 ///////////////////////////////////////////////////////////////////////////
+// 이벤트 핸들러 — 각 단계에서 원하는 기능을 추가하세요
+///////////////////////////////////////////////////////////////////////////
+
+// 거리센서가 물체를 감지했을 때 호출됩니다 (카메라 촬영 전)
+// distance: 감지된 거리 (mm)
+void onObjectDetected(uint16_t distance) {
+  Serial.printf(">>> onObjectDetected 발생 (%dmm)\n", distance);
+}
+
+// GPT에 인식 요청을 보내기 직전에 호출됩니다
+void onRecognitionStart() {
+  Serial.println(">>> onRecognitionStart 발생");
+}
+
+// GPT로부터 인식 결과를 받았을 때 호출됩니다
+// objectName: 인식된 물체 이름 (예: "SpongeBob figurine")
+void onRecognitionResult(const String& objectName) {
+  Serial.println(">>> onRecognitionResult 발생: " + objectName);
+}
+
+///////////////////////////////////////////////////////////////////////////
 // WiFi
 ///////////////////////////////////////////////////////////////////////////
 
@@ -453,20 +474,7 @@ void loop() {
     return;
   }
 
-  // OLED 거리 업데이트
-  static unsigned long lastOled = 0;
-  if (millis() - lastOled > 300) {
-    lastOled = millis();
-    char buf[17];
-    snprintf(buf, sizeof(buf), "Dist: %4dmm", distance);
-    oledShowLine(2, buf);
-    if (!objectDetected) {
-      oledShowLine(0, "Monitoring...");
-    }
-  }
-
   if (distance < STOP_DISTANCE) {
-    // === 물체 감지! ===
     if (!objectDetected) {
       // 쿨다운 체크: 인식 직후엔 재트리거 방지
       if (millis() - lastRecognitionTime < RECOGNITION_COOLDOWN) {
@@ -484,18 +492,14 @@ void loop() {
 
       objectDetected = true;
       Serial.printf("\n>>> DETECTED at %dmm!\n", distance);
+      onObjectDetected(distance);
 
-      oledShowLine(0, "== DETECTED ==");
-      char buf[17];
-      snprintf(buf, sizeof(buf), "Dist: %4dmm", distance);
-      oledShowLine(2, buf);
-      oledShowLine(4, "Recognizing...");
+      oledShowLine(0, "Recognizing...");
+      oledShowLine(2, "");
 
-      // 카메라는 I2C_NUM_1(sccb_i2c_port=1)을 쓰므로
-      // Wire(I2C_NUM_0)는 끄지 않고, 레이저만 정지
       distSensor.stopContinuous();
+      onRecognitionStart();
 
-      // 사진 촬영 + API 호출 (카메라 init/deinit 포함)
       String result = takePhotoAndRecognize();
 
       // 레이저 재시작 (Wire/센서 재초기화 불필요)
@@ -506,11 +510,13 @@ void loop() {
 
       // 결과 표시
       Serial.println(">>> Final result: " + result);
-      oledShowLine(4, "Object:");
+      onRecognitionResult(result);
+
+      oledShowLine(0, "");
       char nameBuf[17];
       strncpy(nameBuf, result.c_str(), 16);
       nameBuf[16] = '\0';
-      oledShowLine(5, nameBuf);
+      oledShowLine(2, nameBuf);
     }
   } else {
     // === 물체 없음 ===
@@ -518,8 +524,7 @@ void loop() {
     if (objectDetected) {
       objectDetected = false;
       Serial.printf(">>> Cleared at %dmm\n", distance);
-      oledShowLine(4, "");
-      oledShowLine(5, "");
+      oledShowLine(0, "Ready");
     }
   }
 
