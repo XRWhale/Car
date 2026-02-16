@@ -5,11 +5,10 @@
 //   1. VL53L0X 거리 기반 자동 정지 (STOP_DISTANCE 조절 가능)
 //   2. 카메라 → OpenAI Vision API → OLED 물체명 표시
 //
-// I2C 충돌 해결:
-//   - VL53L0X: Wire (HW I2C) 사용
-//   - OLED: Wire 공유 (같은 버스, 같은 주소 다름)
-//   - 카메라: 물체 감지 시에만 init → 촬영 → deinit
-//     (카메라 SCCB가 I2C를 점유하므로 상시 공존 불가)
+// I2C 구성:
+//   - VL53L0X + OLED: Wire (I2C_NUM_0)
+//   - 카메라 SCCB: I2C_NUM_1 (sccb_i2c_port=1로 분리)
+//   - 카메라: 물체 감지 시에만 init → 촬영 → deinit (메모리 절약)
 //
 ///////////////////////////////////////////////////////////////////////////
 
@@ -189,7 +188,7 @@ void connectWiFi() {
 }
 
 ///////////////////////////////////////////////////////////////////////////
-// Camera - 필요할 때만 init/deinit (I2C 충돌 방지)
+// Camera - 필요할 때만 init/deinit (메모리 절약)
 ///////////////////////////////////////////////////////////////////////////
 
 bool cameraInit() {
@@ -261,7 +260,7 @@ String takePhotoAndRecognize() {
   cameraDeinit();
   delay(200);
 
-  // 카메라 deinit 후 WiFi가 깨질 수 있으므로 강제 재연결
+  // 카메라 deinit 후 WiFi 재연결
   Serial.printf(">>> Heap: %d bytes, WiFi status: %d\n", ESP.getFreeHeap(), WiFi.status());
   WiFi.disconnect(true);
   delay(100);
@@ -346,41 +345,6 @@ String takePhotoAndRecognize() {
 }
 
 ///////////////////////////////////////////////////////////////////////////
-// VL53L0X + Wire 재초기화
-///////////////////////////////////////////////////////////////////////////
-
-bool initSensor() {
-  for (int attempt = 1; attempt <= 3; attempt++) {
-    Wire.end();
-    delay(100);
-    Wire.begin();
-    delay(100);
-    Wire.setClock(100000);
-
-    distSensor.setTimeout(500);
-    if (distSensor.init()) {
-      distSensor.setSignalRateLimit(0.1);
-      distSensor.setMeasurementTimingBudget(33000);
-      distSensor.startContinuous(50);
-
-      // OLED도 같은 I2C 버스이므로 재초기화
-      u8x8.begin();
-      u8x8.setPowerSave(0);
-      u8x8.setFont(u8x8_font_chroma48medium8_r);
-
-      // 검증: 실제 읽기 테스트
-      delay(200);
-      uint16_t test = distSensor.readRangeContinuousMillimeters();
-      Serial.printf("[OK] VL53L0X (attempt %d, test: %dmm)\n", attempt, test);
-      return true;
-    }
-    Serial.printf("[FAIL] VL53L0X restore attempt %d/3\n", attempt);
-    delay(500);
-  }
-  return false;
-}
-
-///////////////////////////////////////////////////////////////////////////
 // OLED
 ///////////////////////////////////////////////////////////////////////////
 
@@ -411,7 +375,7 @@ void setup() {
   Serial.println("[1] Wire + VL53L0X + OLED init...");
   Wire.begin();
   delay(100);
-  Wire.setClock(100000);  // 100kHz (안정적)
+  Wire.setClock(100000);
 
   // VL53L0X (최대 3회 재시도)
   bool sensorOK = false;
@@ -435,17 +399,12 @@ void setup() {
     Wire.setClock(100000);
   }
 
-  // OLED (같은 Wire 버스 공유)
   u8x8.begin();
   u8x8.setPowerSave(0);
   u8x8.setFont(u8x8_font_chroma48medium8_r);
   u8x8.clear();
   u8x8.drawString(0, 0, "Booting...");
   Serial.println("[OK] OLED");
-
-  // VL53L0X 다시 테스트 (OLED init 후에도 작동하는지)
-  uint16_t test2 = distSensor.readRangeContinuousMillimeters();
-  Serial.printf("[CHECK] VL53L0X after OLED: %dmm\n", test2);
 
   // ---- 2. WiFi ----
   Serial.println("[2] WiFi...");
@@ -454,14 +413,8 @@ void setup() {
   wifiReady = (WiFi.status() == WL_CONNECTED);
   u8x8.drawString(0, 2, wifiReady ? "WiFi OK" : "WiFi FAIL");
 
-  // ---- 카메라는 여기서 초기화하지 않음! ----
-  // 카메라 SCCB가 I2C를 점유하므로, 물체 감지 시에만 init/deinit
   Serial.println("[!] Camera: on-demand (not init at boot)");
   u8x8.drawString(0, 4, "Cam: on-demand");
-
-  // ---- VL53L0X 최종 테스트 ----
-  uint16_t test3 = distSensor.readRangeContinuousMillimeters();
-  Serial.printf("[CHECK] VL53L0X final: %dmm\n", test3);
 
   Serial.println("========================================");
   Serial.printf("  Free heap: %d bytes\n", ESP.getFreeHeap());
