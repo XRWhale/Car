@@ -312,6 +312,7 @@ header h1 { font-size: 1.4rem; }
   height: auto;
   object-fit: cover;
   border-radius: 8px;
+  transform: scaleY(-1);
 }
 
 .cam-overlay {
@@ -358,7 +359,9 @@ header h1 { font-size: 1.4rem; }
   font-size: 0.75rem;
   color: #555;
   text-align: right;
+  transition: color 0.3s;
 }
+.cam-fps.live { color: var(--green); }
 
 /* Event Log */
 .log-panel { max-height: 200px; }

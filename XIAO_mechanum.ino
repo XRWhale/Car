@@ -86,6 +86,11 @@ U8X8_SSD1306_128X64_NONAME_HW_I2C u8x8(U8X8_PIN_NONE);
 WebsocketsClient wsClient;
 WebServer webServer(80);
 
+// ===== MJPEG Stream (FreeRTOS, Core 0) =====
+SemaphoreHandle_t camMutex    = NULL;
+volatile bool     streamRunning = false;
+WiFiClient        streamCl;
+
 // State
 bool objectDetected = false;
 bool wifiReady = false;
@@ -354,19 +359,68 @@ bool cameraInit() {
 }
 
 ///////////////////////////////////////////////////////////////////////////
+// MJPEG 스트림 태스크 (Core 0에서 실행)
+// multipart/x-mixed-replace 포맷으로 프레임을 연속 전송.
+// cameraInUse 플래그로 AI 캡처 중 일시 정지.
+///////////////////////////////////////////////////////////////////////////
+
+void camStreamTask(void*) {
+  for (;;) {
+    if (!streamRunning) { vTaskDelay(pdMS_TO_TICKS(50)); continue; }
+    if (!streamCl.connected()) { streamRunning = false; vTaskDelay(pdMS_TO_TICKS(50)); continue; }
+    if (cameraInUse)  { vTaskDelay(pdMS_TO_TICKS(50)); continue; }
+
+    if (xSemaphoreTake(camMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+      vTaskDelay(pdMS_TO_TICKS(30)); continue;
+    }
+    camera_fb_t* fb = esp_camera_fb_get();
+    xSemaphoreGive(camMutex);
+    if (!fb) { vTaskDelay(pdMS_TO_TICKS(50)); continue; }
+
+    char hdr[96];
+    snprintf(hdr, sizeof(hdr),
+      "--f\r\nContent-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n",
+      (unsigned)fb->len);
+    streamCl.print(hdr);
+    size_t written = streamCl.write(fb->buf, fb->len);
+    esp_camera_fb_return(fb);
+
+    if (!written) { streamRunning = false; continue; }
+    streamCl.print("\r\n");
+    vTaskDelay(pdMS_TO_TICKS(40)); // ~25fps 상한
+  }
+}
+
+void handleStream() {
+  if (!cameraReady) { webServer.send(503, "text/plain", "no camera"); return; }
+  streamRunning = false;
+  vTaskDelay(pdMS_TO_TICKS(80)); // 태스크가 현재 쓰기 완료할 때까지 대기
+  streamCl = webServer.client();
+  streamCl.print(
+    "HTTP/1.1 200 OK\r\n"
+    "Content-Type: multipart/x-mixed-replace;boundary=f\r\n"
+    "Cache-Control: no-cache\r\n"
+    "Access-Control-Allow-Origin: *\r\n"
+    "Connection: close\r\n\r\n");
+  streamRunning = true;
+}
+
+///////////////////////////////////////////////////////////////////////////
 // 웹 서버 핸들러 (포트 80)
 //
-// /capture  JPEG 스냅샷 1장. raw 클라이언트로 직접 전송(binary-safe).
-// /status   {"capturing":true/false}  recognizing 플래그 반환.
-// /         HTML 뷰어 페이지.
+// /stream   MJPEG 연속 스트림 (CORS 허용, 브라우저 img 태그로 직접 수신)
+// /capture  JPEG 스냅샷 1장 (폴백용)
+// /status   {"capturing":true/false}
+// /         HTML 뷰어 페이지
 ///////////////////////////////////////////////////////////////////////////
 
 void handleCapture() {
   if (!cameraReady) { webServer.send(503, "text/plain", "no camera"); return; }
   if (cameraInUse)  { webServer.send(503, "text/plain", "busy");      return; }
 
+  xSemaphoreTake(camMutex, portMAX_DELAY);
   camera_fb_t* fb = esp_camera_fb_get();
-  if (!fb) { webServer.send(500, "text/plain", "capture failed"); return; }
+  if (!fb) { xSemaphoreGive(camMutex); webServer.send(500, "text/plain", "capture failed"); return; }
 
   // WebServer 는 이진 데이터를 직접 지원하지 않으므로 raw 소켓으로 전송
   WiFiClient client = webServer.client();
@@ -389,6 +443,7 @@ void handleCapture() {
     buf += sent; remaining -= sent;
   }
   esp_camera_fb_return(fb);
+  xSemaphoreGive(camMutex);
 }
 
 void handleStatus() {
@@ -490,12 +545,14 @@ String takePhotoAndRecognize() {
 
   cameraInUse = true;
   Serial.println(">>> Taking photo...");
+  xSemaphoreTake(camMutex, portMAX_DELAY);
   camera_fb_t* fb = esp_camera_fb_get();
-  if (!fb) { cameraInUse = false; return "Capture Error"; }
+  if (!fb) { xSemaphoreGive(camMutex); cameraInUse = false; return "Capture Error"; }
   Serial.printf(">>> Photo: %d bytes\n", fb->len);
 
   String b64 = base64::encode(fb->buf, fb->len);
   esp_camera_fb_return(fb);
+  xSemaphoreGive(camMutex);
   cameraInUse = false;
 
   if (WiFi.status() != WL_CONNECTED) { b64 = ""; return "WiFi Error"; }
@@ -603,7 +660,10 @@ void setup() {
 
   // ---- 4. Web Server (포트 80) ----
   if (wifiReady) {
+    camMutex = xSemaphoreCreateMutex();
+    xTaskCreatePinnedToCore(camStreamTask, "stream", 4096, NULL, 1, NULL, 0); // Core 0
     webServer.on("/",        handleRoot);
+    webServer.on("/stream",  handleStream);
     webServer.on("/capture", handleCapture);
     webServer.on("/status",  handleStatus);
     webServer.begin();

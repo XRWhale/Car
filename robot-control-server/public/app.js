@@ -77,10 +77,14 @@ function handleEvent(msg) {
       break;
     case 'recognition_start':
       addLog('Recognition started...', 'log-event');
+      document.getElementById('camOverlay').classList.add('on');
+      document.getElementById('camStatus').textContent = 'AI Recognizing...';
       break;
     case 'recognition_result':
       addLog(`Recognized: ${data.result}`, 'log-event');
       addChatMessage('system', `Object recognized: ${data.result}`);
+      document.getElementById('camOverlay').classList.remove('on');
+      document.getElementById('camStatus').textContent = camDeviceIp ? `http://${camDeviceIp}` : 'No device';
       break;
     case 'device_info':
       if (data.ip) {
@@ -93,47 +97,20 @@ function handleEvent(msg) {
   }
 }
 
-// ===== Camera Feed =====
+// ===== Camera Feed (MJPEG stream) =====
 let camDeviceIp = null;
-let camBusy = false;
-let camCapturing = false;
-let camFc = 0;
-let camFt = Date.now();
-let camPollTimer = null;
 let camStatusTimer = null;
 
 function startCameraFeed(ip) {
   camDeviceIp = ip;
   document.getElementById('camStatus').textContent = `http://${ip}`;
-  addLog(`Camera feed started: http://${ip}/capture`, 'log-event');
-  nextCamFrame();
+  const fpsEl = document.getElementById('camFps');
+  fpsEl.textContent = '● Live';
+  fpsEl.classList.add('live');
+  addLog(`Camera feed started: http://${ip}/stream`, 'log-event');
+  // MJPEG: 브라우저가 img 태그에서 스트림을 직접 수신 — 폴링 불필요
+  document.getElementById('camFeed').src = `http://${ip}/stream`;
   camStatusTimer = setInterval(pollCamStatus, 500);
-}
-
-function nextCamFrame() {
-  if (!camDeviceIp) return;
-  if (camBusy || camCapturing) {
-    camPollTimer = setTimeout(nextCamFrame, camCapturing ? 300 : 30);
-    return;
-  }
-  camBusy = true;
-  const img = new Image();
-  img.onload = () => {
-    document.getElementById('camFeed').src = img.src;
-    camBusy = false;
-    camFc++;
-    const now = Date.now();
-    if (now - camFt >= 1000) {
-      document.getElementById('camFps').textContent = `${camFc} fps`;
-      camFc = 0; camFt = now;
-    }
-    camPollTimer = setTimeout(nextCamFrame, 80); // ~12fps
-  };
-  img.onerror = () => {
-    camBusy = false;
-    camPollTimer = setTimeout(nextCamFrame, 500);
-  };
-  img.src = `http://${camDeviceIp}/capture?t=${Date.now()}`;
 }
 
 async function pollCamStatus() {
@@ -141,15 +118,12 @@ async function pollCamStatus() {
   try {
     const res = await fetch(`http://${camDeviceIp}/status`, { cache: 'no-store' });
     const data = await res.json();
-    camCapturing = data.capturing;
-    const overlay = document.getElementById('camOverlay');
-    const statusEl = document.getElementById('camStatus');
-    if (camCapturing) {
-      overlay.classList.add('on');
-      statusEl.textContent = 'AI Recognizing...';
+    if (data.capturing) {
+      document.getElementById('camOverlay').classList.add('on');
+      document.getElementById('camStatus').textContent = 'AI Recognizing...';
     } else {
-      overlay.classList.remove('on');
-      statusEl.textContent = `http://${camDeviceIp}`;
+      document.getElementById('camOverlay').classList.remove('on');
+      document.getElementById('camStatus').textContent = `http://${camDeviceIp}`;
     }
   } catch (e) {
     // device unreachable, keep trying
