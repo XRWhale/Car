@@ -3,109 +3,171 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Robot AI Control</title>
+  <title>MECANUM HUD v1.0 — Robot Command Center</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Space+Mono&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" rel="stylesheet">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <div class="container">
-    <!-- Header -->
-    <header>
-      <h1>Robot AI Control</h1>
-      <div class="status">
-        <span id="deviceStatus" class="status-badge disconnected">Device: Disconnected</span>
-        <span id="wsStatus" class="status-badge disconnected">Server: Disconnected</span>
-      </div>
-    </header>
+<div class="hud-root">
 
-    <!-- Camera Feed -->
-    <div class="panel camera-panel">
-      <h2>Camera Feed <span id="camStatus" class="cam-status">No device</span></h2>
-      <div class="cam-wrap">
-        <img id="camFeed" alt="Camera feed">
-        <div id="camOverlay" class="cam-overlay">
-          <div class="cam-spinner"></div>
-          <span class="cam-badge">AI Recognizing</span>
-          <span class="cam-msg">Taking photo &amp; calling OpenAI...</span>
-        </div>
-      </div>
-      <div id="camFps" class="cam-fps"></div>
-    </div>
-
-    <div class="main-grid">
-      <!-- Left: Controls -->
-      <div class="panel controls-panel">
-        <!-- Distance -->
-        <div class="section">
-          <h2>Distance Sensor</h2>
-          <div class="distance-display">
-            <span id="distValue">--</span><span class="unit">mm</span>
-          </div>
-          <div class="distance-bar-container">
-            <div id="distBar" class="distance-bar"></div>
-          </div>
-          <canvas id="distGraph" width="300" height="80"></canvas>
-        </div>
-
-        <!-- Manual Control -->
-        <div class="section">
-          <h2>Manual Control</h2>
-          <div class="control-pad">
-            <div class="pad-row">
-              <button class="pad-btn small" data-cmd="strafe_left">SL</button>
-              <button class="pad-btn" data-cmd="move_forward">FWD</button>
-              <button class="pad-btn small" data-cmd="strafe_right">SR</button>
-            </div>
-            <div class="pad-row">
-              <button class="pad-btn" data-cmd="turn_left">TL</button>
-              <button class="pad-btn stop" data-cmd="stop_motors">STOP</button>
-              <button class="pad-btn" data-cmd="turn_right">TR</button>
-            </div>
-            <div class="pad-row">
-              <div class="pad-spacer"></div>
-              <button class="pad-btn" data-cmd="move_backward">BWD</button>
-              <div class="pad-spacer"></div>
-            </div>
-          </div>
-          <div class="speed-control">
-            <label>Speed: <span id="speedValue">200</span></label>
-            <input type="range" id="speedSlider" min="50" max="255" value="200">
-          </div>
-        </div>
-
-        <!-- Autonomous Mode -->
-        <div class="section">
-          <div class="toggle-row">
-            <span>Autonomous Mode</span>
-            <label class="switch">
-              <input type="checkbox" id="autoModeToggle" checked>
-              <span class="slider"></span>
-            </label>
-          </div>
-          <button class="action-btn" id="photoBtn">Take Photo & Recognize</button>
-        </div>
-      </div>
-
-      <!-- Right: Chat -->
-      <div class="panel chat-panel">
-        <h2>AI Chat</h2>
-        <div id="chatLog" class="chat-log">
-          <div class="chat-msg system">System ready. Type a message or use voice input.</div>
-        </div>
-        <div class="chat-input">
-          <button id="voiceBtn" class="voice-btn" title="Voice Input (Korean)">MIC</button>
-          <input type="text" id="chatInput" placeholder="Type a command..." autocomplete="off">
-          <button id="sendBtn" class="send-btn">Send</button>
+  <!-- ── Header ── -->
+  <header class="hud-header">
+    <div class="hud-logo">
+      <span class="material-symbols-outlined logo-icon">precision_manufacturing</span>
+      <div>
+        <h1 class="hud-title">Mecanum HUD</h1>
+        <div class="sys-link">
+          <span class="sys-link-dot"></span>
+          <span class="sys-link-text">System Link: Active</span>
         </div>
       </div>
     </div>
-
-    <!-- Event Log -->
-    <div class="panel log-panel">
-      <h2>Event Log <button id="clearLogBtn" class="clear-btn">Clear</button></h2>
-      <div id="eventLog" class="event-log"></div>
+    <div class="header-status">
+      <span id="deviceStatus" class="status-badge disconnected">Device: Disconnected</span>
+      <span id="wsStatus"     class="status-badge disconnected">Server: Disconnected</span>
     </div>
-  </div>
+  </header>
 
-  <script src="app.js"></script>
+  <!-- ── Main 3-column layout ── -->
+  <div class="hud-main">
+
+    <!-- Left Sidebar: Controls -->
+    <aside class="panel sidebar-left">
+
+      <!-- Distance Sensor -->
+      <div class="section">
+        <div class="section-hd">
+          <span class="section-label">Proximity Sensor</span>
+          <span class="material-symbols-outlined icon-sm">sensors</span>
+        </div>
+        <div class="distance-display">
+          <span id="distValue">--</span><span class="unit">mm</span>
+        </div>
+        <div class="distance-bar-container">
+          <div id="distBar" class="distance-bar"></div>
+        </div>
+        <canvas id="distGraph" width="300" height="70"></canvas>
+      </div>
+
+      <!-- Manual Control -->
+      <div class="section">
+        <div class="section-hd">
+          <span class="section-label">Movement Control</span>
+          <span class="material-symbols-outlined icon-sm">gamepad</span>
+        </div>
+        <div class="control-pad">
+          <div class="pad-row">
+            <button class="pad-btn small" data-cmd="strafe_left">SL</button>
+            <button class="pad-btn"       data-cmd="move_forward">FWD</button>
+            <button class="pad-btn small" data-cmd="strafe_right">SR</button>
+          </div>
+          <div class="pad-row">
+            <button class="pad-btn"      data-cmd="turn_left">TL</button>
+            <button class="pad-btn stop" data-cmd="stop_motors">STOP</button>
+            <button class="pad-btn"      data-cmd="turn_right">TR</button>
+          </div>
+          <div class="pad-row">
+            <div class="pad-spacer"></div>
+            <button class="pad-btn" data-cmd="move_backward">BWD</button>
+            <div class="pad-spacer"></div>
+          </div>
+        </div>
+        <div class="speed-control">
+          <label>Speed: <span id="speedValue">200</span></label>
+          <input type="range" id="speedSlider" min="50" max="255" value="200">
+        </div>
+      </div>
+
+      <!-- System Mode -->
+      <div class="section">
+        <div class="section-hd">
+          <span class="section-label">System Mode</span>
+          <span class="material-symbols-outlined icon-sm">settings_suggest</span>
+        </div>
+        <div class="toggle-row">
+          <span class="toggle-label">Autonomous Mode</span>
+          <label class="switch">
+            <input type="checkbox" id="autoModeToggle" checked>
+            <span class="slider"></span>
+          </label>
+        </div>
+        <button class="action-btn" id="photoBtn">
+          <span class="material-symbols-outlined">photo_camera</span>
+          Take Photo &amp; Recognize
+        </button>
+      </div>
+
+    </aside>
+
+    <!-- Center: Camera + Log -->
+    <aside class="sidebar-right">
+
+      <!-- Camera -->
+      <div class="panel camera-panel">
+        <div class="cam-header">
+          <div class="cam-header-left">
+            <span class="material-symbols-outlined rec-dot">videocam</span>
+            <h2 class="cam-title">Live Feed 01</h2>
+          </div>
+          <span id="camStatus" class="cam-status-text">No device</span>
+        </div>
+        <div class="cam-wrap">
+          <img id="camFeed" alt="Camera feed">
+          <div class="cam-scanline"></div>
+          <div class="cam-crosshair">
+            <div class="ch ch-t"></div>
+            <div class="ch ch-b"></div>
+            <div class="ch ch-l"></div>
+            <div class="ch ch-r"></div>
+          </div>
+          <div id="camOverlay" class="cam-overlay">
+            <div class="cam-spinner"></div>
+            <span class="cam-badge">AI Recognizing</span>
+            <span class="cam-msg">Taking photo &amp; calling OpenAI...</span>
+          </div>
+        </div>
+        <div class="cam-footer">
+          <div id="camFps" class="cam-fps"></div>
+        </div>
+      </div>
+
+      <!-- Event Log -->
+      <div class="panel log-panel">
+        <div class="section-hd" style="flex-shrink:0;">
+          <div style="display:flex;align-items:center;gap:7px;">
+            <span class="material-symbols-outlined icon-sm">history_edu</span>
+            <span class="section-label">Operation Log</span>
+          </div>
+          <button id="clearLogBtn" class="clear-btn">Clear</button>
+        </div>
+        <div id="eventLog" class="event-log"></div>
+      </div>
+
+    </aside>
+
+    <!-- Right: Chat -->
+    <section class="panel center-panel">
+      <div class="section-hd" style="margin-bottom:12px;flex-shrink:0;">
+        <span class="section-label">AI Command Channel</span>
+        <span class="material-symbols-outlined icon-sm">smart_toy</span>
+      </div>
+      <div id="chatLog" class="chat-log">
+        <div class="chat-msg system">System ready. Type a command or use voice input.</div>
+      </div>
+      <div class="chat-input-row" style="flex-shrink:0;">
+        <button id="voiceBtn" class="voice-btn" title="Voice Input (Korean)">MIC</button>
+        <div class="chat-input-wrap">
+          <span class="terminal-prefix material-symbols-outlined">terminal</span>
+          <input type="text" id="chatInput" placeholder="Type a command or query robot status..." autocomplete="off">
+        </div>
+        <button id="sendBtn" class="send-btn">Send</button>
+      </div>
+    </section>
+
+  </div><!-- /hud-main -->
+</div><!-- /hud-root -->
+<script src="app.js"></script>
 </body>
 </html>
