@@ -82,8 +82,77 @@ function handleEvent(msg) {
       addLog(`Recognized: ${data.result}`, 'log-event');
       addChatMessage('system', `Object recognized: ${data.result}`);
       break;
+    case 'device_info':
+      if (data.ip) {
+        addLog(`Device IP: ${data.ip}`, 'log-event');
+        startCameraFeed(data.ip);
+      }
+      break;
     default:
       addLog(`Event: ${evt} ${JSON.stringify(data)}`, 'log-event');
+  }
+}
+
+// ===== Camera Feed =====
+let camDeviceIp = null;
+let camBusy = false;
+let camCapturing = false;
+let camFc = 0;
+let camFt = Date.now();
+let camPollTimer = null;
+let camStatusTimer = null;
+
+function startCameraFeed(ip) {
+  camDeviceIp = ip;
+  document.getElementById('camStatus').textContent = `http://${ip}`;
+  addLog(`Camera feed started: http://${ip}/capture`, 'log-event');
+  nextCamFrame();
+  camStatusTimer = setInterval(pollCamStatus, 500);
+}
+
+function nextCamFrame() {
+  if (!camDeviceIp) return;
+  if (camBusy || camCapturing) {
+    camPollTimer = setTimeout(nextCamFrame, camCapturing ? 300 : 30);
+    return;
+  }
+  camBusy = true;
+  const img = new Image();
+  img.onload = () => {
+    document.getElementById('camFeed').src = img.src;
+    camBusy = false;
+    camFc++;
+    const now = Date.now();
+    if (now - camFt >= 1000) {
+      document.getElementById('camFps').textContent = `${camFc} fps`;
+      camFc = 0; camFt = now;
+    }
+    camPollTimer = setTimeout(nextCamFrame, 80); // ~12fps
+  };
+  img.onerror = () => {
+    camBusy = false;
+    camPollTimer = setTimeout(nextCamFrame, 500);
+  };
+  img.src = `http://${camDeviceIp}/capture?t=${Date.now()}`;
+}
+
+async function pollCamStatus() {
+  if (!camDeviceIp) return;
+  try {
+    const res = await fetch(`http://${camDeviceIp}/status`, { cache: 'no-store' });
+    const data = await res.json();
+    camCapturing = data.capturing;
+    const overlay = document.getElementById('camOverlay');
+    const statusEl = document.getElementById('camStatus');
+    if (camCapturing) {
+      overlay.classList.add('on');
+      statusEl.textContent = 'AI Recognizing...';
+    } else {
+      overlay.classList.remove('on');
+      statusEl.textContent = `http://${camDeviceIp}`;
+    }
+  } catch (e) {
+    // device unreachable, keep trying
   }
 }
 

@@ -17,6 +17,20 @@
       </div>
     </header>
 
+    <!-- Camera Feed -->
+    <div class="panel camera-panel">
+      <h2>Camera Feed <span id="camStatus" class="cam-status">No device</span></h2>
+      <div class="cam-wrap">
+        <img id="camFeed" alt="Camera feed">
+        <div id="camOverlay" class="cam-overlay">
+          <div class="cam-spinner"></div>
+          <span class="cam-badge">AI Recognizing</span>
+          <span class="cam-msg">Taking photo &amp; calling OpenAI...</span>
+        </div>
+      </div>
+      <div id="camFps" class="cam-fps"></div>
+    </div>
+
     <div class="main-grid">
       <!-- Left: Controls -->
       <div class="panel controls-panel">
