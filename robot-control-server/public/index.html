@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Robot AI Control</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="container">
+    <!-- Header -->
+    <header>
+      <h1>Robot AI Control</h1>
+      <div class="status">
+        <span id="deviceStatus" class="status-badge disconnected">Device: Disconnected</span>
+        <span id="wsStatus" class="status-badge disconnected">Server: Disconnected</span>
+      </div>
+    </header>
+
+    <div class="main-grid">
+      <!-- Left: Controls -->
+      <div class="panel controls-panel">
+        <!-- Distance -->
+        <div class="section">
+          <h2>Distance Sensor</h2>
+          <div class="distance-display">
+            <span id="distValue">--</span><span class="unit">mm</span>
+          </div>
+          <div class="distance-bar-container">
+            <div id="distBar" class="distance-bar"></div>
+          </div>
+          <canvas id="distGraph" width="300" height="80"></canvas>
+        </div>
+
+        <!-- Manual Control -->
+        <div class="section">
+          <h2>Manual Control</h2>
+          <div class="control-pad">
+            <div class="pad-row">
+              <button class="pad-btn small" data-cmd="strafe_left">SL</button>
+              <button class="pad-btn" data-cmd="move_forward">FWD</button>
+              <button class="pad-btn small" data-cmd="strafe_right">SR</button>
+            </div>
+            <div class="pad-row">
+              <button class="pad-btn" data-cmd="turn_left">TL</button>
+              <button class="pad-btn stop" data-cmd="stop_motors">STOP</button>
+              <button class="pad-btn" data-cmd="turn_right">TR</button>
+            </div>
+            <div class="pad-row">
+              <div class="pad-spacer"></div>
+              <button class="pad-btn" data-cmd="move_backward">BWD</button>
+              <div class="pad-spacer"></div>
+            </div>
+          </div>
+          <div class="speed-control">
+            <label>Speed: <span id="speedValue">200</span></label>
+            <input type="range" id="speedSlider" min="50" max="255" value="200">
+          </div>
+        </div>
+
+        <!-- Autonomous Mode -->
+        <div class="section">
+          <div class="toggle-row">
+            <span>Autonomous Mode</span>
+            <label class="switch">
+              <input type="checkbox" id="autoModeToggle" checked>
+              <span class="slider"></span>
+            </label>
+          </div>
+          <button class="action-btn" id="photoBtn">Take Photo & Recognize</button>
+        </div>
+      </div>
+
+      <!-- Right: Chat -->
+      <div class="panel chat-panel">
+        <h2>AI Chat</h2>
+        <div id="chatLog" class="chat-log">
+          <div class="chat-msg system">System ready. Type a message or use voice input.</div>
+        </div>
+        <div class="chat-input">
+          <button id="voiceBtn" class="voice-btn" title="Voice Input (Korean)">MIC</button>
+          <input type="text" id="chatInput" placeholder="Type a command..." autocomplete="off">
+          <button id="sendBtn" class="send-btn">Send</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Event Log -->
+    <div class="panel log-panel">
+      <h2>Event Log <button id="clearLogBtn" class="clear-btn">Clear</button></h2>
+      <div id="eventLog" class="event-log"></div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

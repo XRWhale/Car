@@ -1,0 +1,16 @@
+{
+  "name": "robot-control-server",
+  "version": "1.0.0",
+  "description": "Web AI control server for XIAO ESP32S3 mechanum wheel robot",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "openai": "^4.20.0",
+    "ws": "^8.16.0"
+  }
+}

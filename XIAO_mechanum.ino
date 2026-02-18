@@ -1,14 +1,19 @@
 ///////////////////////////////////////////////////////////////////////////
-// XIAO ESP32S3 Sense - Mechanum Wheel Robot
+// XIAO ESP32S3 Sense - Mechanum Wheel Robot + WebSocket AI Control
 //
 // Features:
 //   1. VL53L0X 거리 기반 자동 정지 (STOP_DISTANCE 조절 가능)
 //   2. 카메라 → OpenAI Vision API → OLED 물체명 표시
+//   3. WebSocket 클라이언트 → Node.js 서버 실시간 통신
+//   4. AI 자연어 명령 수신 → 모터/카메라/OLED 제어
 //
 // I2C 구성:
 //   - VL53L0X + OLED: Wire (I2C_NUM_0)
 //   - 카메라 SCCB: I2C_NUM_1 (sccb_i2c_port=1로 분리)
-//   - 카메라: 물체 감지 시에만 init → 촬영 → deinit (메모리 절약)
+//   - 카메라: 필요 시에만 init → 촬영 → deinit (메모리 절약)
+//
+// 필요 라이브러리:
+//   ArduinoWebsockets (gilmaimon), ArduinoJson (v6)
 //
 ///////////////////////////////////////////////////////////////////////////
 
@@ -20,15 +25,27 @@
 #include <HTTPClient.h>
 #include "esp_camera.h"
 #include <base64.h>
+#include <ArduinoWebsockets.h>
+#include <ArduinoJson.h>
+
+using namespace websockets;
 
 // ===== 빌드 전 조절 가능한 설정값 =====
-#define STOP_DISTANCE  300   // mm - 이 거리 이내 물체 감지 시 정지
-#define MOTOR_SPEED    200   // 0-255 기본 전진 속도
+#define STOP_DISTANCE         300    // mm - 이 거리 이내 물체 감지 시 정지
+#define MOTOR_SPEED           200    // 0-255 기본 전진 속도
+#define WS_RECONNECT_INTERVAL 5000   // ms - WS 재접속 간격
+#define DIST_STREAM_INTERVAL  500    // ms - 거리 데이터 스트리밍 간격
+#define RECOGNITION_COOLDOWN  3000   // ms - 인식 후 재감지 금지 시간
+#define DETECT_CONFIRM_COUNT  3      // 연속 N회 감지해야 트리거
+#define MAX_DURATION_MS       5000   // ms - 모터 명령 최대 지속시간
 
 // ===== WiFi & API 설정 =====
 const char* WIFI_SSID      = "asdf";
 const char* WIFI_PASSWORD   = "qwe789zxc123";
 const char* OPENAI_API_KEY  = "";
+
+// ===== WebSocket 서버 설정 (★ 서버 IP를 실제 주소로 변경하세요) =====
+const char* WS_SERVER_URL = "ws://192.168.43.148:3000/ws/esp32";
 
 // ===== Motor Pins =====
 #define MOTOR_A_P    7
@@ -61,13 +78,23 @@ const char* OPENAI_API_KEY  = "";
 // ===== Global Objects =====
 VL53L0X distSensor;
 U8X8_SSD1306_128X64_NONAME_HW_I2C u8x8(U8X8_PIN_NONE);
+WebsocketsClient wsClient;
 
+// State
 bool objectDetected = false;
 bool wifiReady = false;
-unsigned long lastRecognitionTime = 0;       // 마지막 인식 완료 시각
-int detectConfirmCount = 0;                  // 연속 감지 카운터
-#define RECOGNITION_COOLDOWN  3000           // 인식 후 재감지 금지 시간 (ms)
-#define DETECT_CONFIRM_COUNT  3              // 연속 N회 감지해야 트리거
+bool wsConnected = false;
+bool autonomousMode = true;
+unsigned long lastRecognitionTime = 0;
+int detectConfirmCount = 0;
+unsigned long lastWsReconnect = 0;
+unsigned long lastDistStream = 0;
+
+// Camera command state (WS 끊김 대응)
+bool cameraRequested = false;
+bool cameraPending = false;
+String cameraCmdId;
+String cameraResult;
 
 ///////////////////////////////////////////////////////////////////////////
 // Motor Control
@@ -147,24 +174,176 @@ void s_l(unsigned int speed) {
 }
 
 ///////////////////////////////////////////////////////////////////////////
-// 이벤트 핸들러 — 각 단계에서 원하는 기능을 추가하세요
+// WebSocket Helpers
 ///////////////////////////////////////////////////////////////////////////
 
-// 거리센서가 물체를 감지했을 때 호출됩니다 (카메라 촬영 전)
-// distance: 감지된 거리 (mm)
+void wsSendRaw(const String& json) {
+  if (wsConnected) {
+    wsClient.send(json);
+  }
+}
+
+void wsSendEvent(const char* eventName) {
+  if (!wsConnected) return;
+  String msg = "{\"type\":\"event\",\"event\":\"";
+  msg += eventName;
+  msg += "\"}";
+  wsClient.send(msg);
+}
+
+void wsSendEventData(const char* eventName, const String& dataJson) {
+  if (!wsConnected) return;
+  String msg = "{\"type\":\"event\",\"event\":\"";
+  msg += eventName;
+  msg += "\",\"data\":";
+  msg += dataJson;
+  msg += "}";
+  wsClient.send(msg);
+}
+
+void wsSendResponse(const char* cmdId, const char* status, const String& dataJson) {
+  if (!wsConnected) return;
+  String msg = "{\"type\":\"response\",\"id\":\"";
+  msg += cmdId;
+  msg += "\",\"status\":\"";
+  msg += status;
+  msg += "\",\"data\":";
+  msg += dataJson;
+  msg += "}";
+  wsClient.send(msg);
+}
+
+///////////////////////////////////////////////////////////////////////////
+// WebSocket Command Handler
+///////////////////////////////////////////////////////////////////////////
+
+void handleWsMessage(WebsocketsMessage message) {
+  String payload = message.data();
+  Serial.println("WS << " + payload);
+
+  StaticJsonDocument<512> doc;
+  DeserializationError err = deserializeJson(doc, payload);
+  if (err) {
+    Serial.println("JSON parse error");
+    return;
+  }
+
+  const char* id = doc["id"] | "0";
+  const char* command = doc["command"];
+  if (!command) return;
+
+  String cmd(command);
+  JsonObject params = doc["params"];
+  int speed = params["speed"] | MOTOR_SPEED;
+  int duration = params["duration_ms"] | 0;
+  if (duration > MAX_DURATION_MS) duration = MAX_DURATION_MS;
+
+  bool isMotorCmd = false;
+
+  if (cmd == "move_forward")       { forward(speed); isMotorCmd = true; }
+  else if (cmd == "move_backward") { backward(speed); isMotorCmd = true; }
+  else if (cmd == "stop_motors")   { stopMotors(); }
+  else if (cmd == "turn_left")     { t_l(speed); isMotorCmd = true; }
+  else if (cmd == "turn_right")    { t_r(speed); isMotorCmd = true; }
+  else if (cmd == "strafe_left")   { s_l(speed); isMotorCmd = true; }
+  else if (cmd == "strafe_right")  { s_r(speed); isMotorCmd = true; }
+  else if (cmd == "take_photo_and_recognize") {
+    cameraRequested = true;
+    cameraCmdId = String(id);
+    wsSendEvent("recognition_start");
+    return;  // loop()에서 처리 후 응답 전송
+  }
+  else if (cmd == "display_text") {
+    int row = params["row"] | 0;
+    const char* text = params["text"] | "";
+    oledShowLine(row, text);
+    wsSendResponse(id, "ok", "{\"displayed\":true}");
+    return;
+  }
+  else if (cmd == "set_autonomous_mode") {
+    autonomousMode = params["enabled"] | true;
+    if (!autonomousMode) {
+      stopMotors();  // 자율 모드 끄면 정지
+    }
+    String d = autonomousMode ? "{\"autonomous_mode\":true}" : "{\"autonomous_mode\":false}";
+    wsSendResponse(id, "ok", d);
+    Serial.printf("Autonomous mode: %s\n", autonomousMode ? "ON" : "OFF");
+    return;
+  }
+  else {
+    wsSendResponse(id, "error", "{\"message\":\"unknown command\"}");
+    return;
+  }
+
+  // 모터 명령 duration 처리
+  if (isMotorCmd && duration > 0) {
+    delay(duration);
+    stopMotors();
+  }
+
+  wsSendResponse(id, "ok", "{\"executed\":true}");
+}
+
+///////////////////////////////////////////////////////////////////////////
+// WebSocket Setup & Connect
+///////////////////////////////////////////////////////////////////////////
+
+void wsSetup() {
+  wsClient.onMessage(handleWsMessage);
+  wsClient.onEvent([](WebsocketsEvent event, String data) {
+    if (event == WebsocketsEvent::ConnectionOpened) {
+      wsConnected = true;
+      Serial.println("WS connected!");
+    } else if (event == WebsocketsEvent::ConnectionClosed) {
+      wsConnected = false;
+      Serial.println("WS disconnected");
+    }
+  });
+}
+
+void wsConnect() {
+  if (WiFi.status() != WL_CONNECTED || wsConnected) return;
+
+  Serial.print("WS connecting to ");
+  Serial.println(WS_SERVER_URL);
+
+  bool ok = wsClient.connect(WS_SERVER_URL);
+  lastWsReconnect = millis();
+
+  if (ok) {
+    wsConnected = true;
+    Serial.println("WS connected!");
+  } else {
+    wsConnected = false;
+    Serial.println("WS connect failed");
+  }
+}
+
+///////////////////////////////////////////////////////////////////////////
+// 이벤트 핸들러
+///////////////////////////////////////////////////////////////////////////
+
 void onObjectDetected(uint16_t distance) {
-  Serial.printf(">>> onObjectDetected 발생 (%dmm)\n", distance);
+  Serial.printf(">>> onObjectDetected (%dmm)\n", distance);
+  StaticJsonDocument<64> d;
+  d["distance_mm"] = distance;
+  String json;
+  serializeJson(d, json);
+  wsSendEventData("object_detected", json);
 }
 
-// GPT에 인식 요청을 보내기 직전에 호출됩니다
 void onRecognitionStart() {
-  Serial.println(">>> onRecognitionStart 발생");
+  Serial.println(">>> onRecognitionStart");
+  wsSendEvent("recognition_start");
 }
 
-// GPT로부터 인식 결과를 받았을 때 호출됩니다
-// objectName: 인식된 물체 이름 (예: "SpongeBob figurine")
 void onRecognitionResult(const String& objectName) {
-  Serial.println(">>> onRecognitionResult 발생: " + objectName);
+  Serial.println(">>> onRecognitionResult: " + objectName);
+  StaticJsonDocument<256> d;
+  d["result"] = objectName;
+  String json;
+  serializeJson(d, json);
+  wsSendEventData("recognition_result", json);
 }
 
 ///////////////////////////////////////////////////////////////////////////
@@ -177,7 +356,6 @@ void connectWiFi() {
   WiFi.disconnect(true);
   delay(100);
 
-  // 주변 네트워크 스캔
   Serial.println("  Scanning networks...");
   int n = WiFi.scanNetworks();
   bool found = false;
@@ -209,7 +387,7 @@ void connectWiFi() {
 }
 
 ///////////////////////////////////////////////////////////////////////////
-// Camera - 필요할 때만 init/deinit (메모리 절약)
+// Camera
 ///////////////////////////////////////////////////////////////////////////
 
 bool cameraInit() {
@@ -240,7 +418,7 @@ bool cameraInit() {
   config.fb_count = 1;
   config.grab_mode = CAMERA_GRAB_LATEST;
   config.fb_location = CAMERA_FB_IN_DRAM;
-  config.sccb_i2c_port = 1;               // I2C_NUM_1 사용 → Wire(I2C_NUM_0) 충돌 방지
+  config.sccb_i2c_port = 1;
 
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
@@ -255,7 +433,7 @@ void cameraDeinit() {
 }
 
 ///////////////////////////////////////////////////////////////////////////
-// 사진 촬영 + API 호출 (카메라 init/deinit 포함)
+// 사진 촬영 + API 호출
 ///////////////////////////////////////////////////////////////////////////
 
 String takePhotoAndRecognize() {
@@ -281,7 +459,6 @@ String takePhotoAndRecognize() {
   cameraDeinit();
   delay(200);
 
-  // 카메라 deinit 후 WiFi 재연결
   Serial.printf(">>> Heap: %d bytes, WiFi status: %d\n", ESP.getFreeHeap(), WiFi.status());
   WiFi.disconnect(true);
   delay(100);
@@ -300,7 +477,6 @@ String takePhotoAndRecognize() {
   }
   Serial.println(" OK");
 
-  // API 호출
   Serial.println(">>> [5/5] Calling OpenAI API...");
   String payload;
   payload.reserve(b64.length() + 400);
@@ -349,7 +525,6 @@ String takePhotoAndRecognize() {
   }
   Serial.println("Response: " + response);
 
-  // "content" 파싱
   int idx = response.indexOf("\"content\"");
   if (idx < 0) return "Parse Error";
   idx = response.indexOf(":", idx);
@@ -389,16 +564,27 @@ void setup() {
 
   Serial.println();
   Serial.println("========================================");
-  Serial.println("  XIAO ESP32S3 - Test Mode");
+  Serial.println("  XIAO ESP32S3 - WebSocket AI Control");
   Serial.println("========================================");
 
-  // ---- 1. Wire + VL53L0X + OLED (같은 HW I2C 버스) ----
+  // ---- 0. Motor Pins ----
+  pinMode(MOTOR_A_P, OUTPUT);
+  pinMode(MOTOR_A_D, OUTPUT);
+  pinMode(MOTOR_B_P, OUTPUT);
+  pinMode(MOTOR_B_D, OUTPUT);
+  pinMode(MOTOR_C_P, OUTPUT);
+  pinMode(MOTOR_C_D, OUTPUT);
+  pinMode(MOTOR_D_P, OUTPUT);
+  pinMode(MOTOR_D_D, OUTPUT);
+  stopMotors();
+  Serial.println("[OK] Motor pins");
+
+  // ---- 1. Wire + VL53L0X + OLED ----
   Serial.println("[1] Wire + VL53L0X + OLED init...");
   Wire.begin();
   delay(100);
   Wire.setClock(100000);
 
-  // VL53L0X (최대 3회 재시도)
   bool sensorOK = false;
   for (int attempt = 1; attempt <= 3; attempt++) {
     distSensor.setTimeout(500);
@@ -434,11 +620,21 @@ void setup() {
   wifiReady = (WiFi.status() == WL_CONNECTED);
   u8x8.drawString(0, 2, wifiReady ? "WiFi OK" : "WiFi FAIL");
 
+  // ---- 3. WebSocket ----
+  Serial.println("[3] WebSocket...");
+  u8x8.drawString(0, 4, "WS connecting...");
+  wsSetup();
+  if (wifiReady) {
+    wsConnect();
+  }
+  u8x8.drawString(0, 4, wsConnected ? "WS OK" : "WS FAIL");
+
   Serial.println("[!] Camera: on-demand (not init at boot)");
-  u8x8.drawString(0, 4, "Cam: on-demand");
+  u8x8.drawString(0, 6, "Cam: on-demand");
 
   Serial.println("========================================");
   Serial.printf("  Free heap: %d bytes\n", ESP.getFreeHeap());
+  Serial.printf("  Autonomous: %s\n", autonomousMode ? "ON" : "OFF");
   Serial.println("========================================");
 
   delay(1500);
@@ -452,6 +648,60 @@ void setup() {
 ///////////////////////////////////////////////////////////////////////////
 
 void loop() {
+  // 1. WS 통신
+  if (wsConnected) {
+    wsClient.poll();
+  }
+
+  // 2. WS 자동 재접속
+  if (WiFi.status() == WL_CONNECTED && !wsConnected) {
+    if (millis() - lastWsReconnect > WS_RECONNECT_INTERVAL) {
+      wsConnect();
+    }
+  }
+
+  // 3. 카메라 명령 처리 (WS 명령으로 요청됨)
+  if (cameraRequested) {
+    cameraRequested = false;
+
+    oledShowLine(0, "Recognizing...");
+    oledShowLine(2, "");
+    distSensor.stopContinuous();
+
+    String result = takePhotoAndRecognize();
+
+    distSensor.startContinuous(50);
+    delay(200);
+    lastRecognitionTime = millis();
+
+    // OLED 표시
+    char nameBuf[17];
+    strncpy(nameBuf, result.c_str(), 16);
+    nameBuf[16] = '\0';
+    oledShowLine(0, "");
+    oledShowLine(2, nameBuf);
+
+    // WiFi 복구 후 WS 재접속 → 응답 전송 (다음 루프에서)
+    cameraResult = result;
+    cameraPending = true;
+    return;
+  }
+
+  // 4. 카메라 결과 전송 (WS 재접속 후)
+  if (cameraPending && wsConnected) {
+    StaticJsonDocument<256> d;
+    d["result"] = cameraResult;
+    String json;
+    serializeJson(d, json);
+    wsSendResponse(cameraCmdId.c_str(), "ok", json);
+    wsSendEventData("recognition_result", json);
+
+    cameraPending = false;
+    cameraCmdId = "";
+    cameraResult = "";
+  }
+
+  // 5. 거리 센서 읽기
   uint16_t distance = distSensor.readRangeContinuousMillimeters();
 
   if (distSensor.timeoutOccurred()) {
@@ -460,71 +710,85 @@ void loop() {
     return;
   }
 
-  // 시리얼 출력 (0.5초마다)
-  static unsigned long lastPrint = 0;
-  if (millis() - lastPrint > 500) {
-    lastPrint = millis();
+  // 6. 거리 출력 + WS 스트리밍
+  if (millis() - lastDistStream > DIST_STREAM_INTERVAL) {
+    lastDistStream = millis();
     Serial.printf("Dist: %dmm\n", distance);
+
+    if (wsConnected) {
+      StaticJsonDocument<64> d;
+      d["distance_mm"] = distance;
+      String json;
+      serializeJson(d, json);
+      wsSendEventData("distance", json);
+    }
   }
 
-  // 범위 밖
+  // 7. 범위 밖
   if (distance > 8000 || distance == 0) {
-    detectConfirmCount = 0;  // 연속 감지 끊김
+    detectConfirmCount = 0;
     delay(50);
     return;
   }
 
-  if (distance < STOP_DISTANCE) {
-    if (!objectDetected) {
-      // 쿨다운 체크: 인식 직후엔 재트리거 방지
-      if (millis() - lastRecognitionTime < RECOGNITION_COOLDOWN) {
-        delay(50);
-        return;
-      }
+  // 8. 자율 모드: 전진 → 물체 감지 시 정지 & 인식 → 물체 사라지면 재전진
+  if (autonomousMode && !cameraPending) {
+    if (distance < STOP_DISTANCE) {
+      // === 물체 감지 ===
+      if (!objectDetected) {
+        if (millis() - lastRecognitionTime < RECOGNITION_COOLDOWN) {
+          delay(50);
+          return;
+        }
 
-      // 디바운싱: 연속 N회 확인
-      detectConfirmCount++;
-      if (detectConfirmCount < DETECT_CONFIRM_COUNT) {
-        delay(50);
-        return;
+        detectConfirmCount++;
+        if (detectConfirmCount < DETECT_CONFIRM_COUNT) {
+          delay(50);
+          return;
+        }
+        detectConfirmCount = 0;
+
+        // 정지 + 인식 시작
+        objectDetected = true;
+        stopMotors();
+        Serial.printf("\n>>> DETECTED at %dmm! Motors stopped.\n", distance);
+        onObjectDetected(distance);
+
+        oledShowLine(0, "Recognizing...");
+        oledShowLine(2, "");
+        distSensor.stopContinuous();
+        onRecognitionStart();
+
+        String result = takePhotoAndRecognize();
+
+        distSensor.startContinuous(50);
+        delay(200);
+        lastRecognitionTime = millis();
+
+        // WiFi 복구 후 WS 재접속
+        if (!wsConnected && WiFi.status() == WL_CONNECTED) {
+          wsConnect();
+        }
+
+        Serial.println(">>> Final result: " + result);
+        onRecognitionResult(result);
+
+        oledShowLine(0, "Stopped");
+        char nameBuf[17];
+        strncpy(nameBuf, result.c_str(), 16);
+        nameBuf[16] = '\0';
+        oledShowLine(2, nameBuf);
       }
+      // objectDetected == true 상태에서는 정지 유지
+    } else {
+      // === 물체 없음 ===
       detectConfirmCount = 0;
-
-      objectDetected = true;
-      Serial.printf("\n>>> DETECTED at %dmm!\n", distance);
-      onObjectDetected(distance);
-
-      oledShowLine(0, "Recognizing...");
-      oledShowLine(2, "");
-
-      distSensor.stopContinuous();
-      onRecognitionStart();
-
-      String result = takePhotoAndRecognize();
-
-      // 레이저 재시작 (Wire/센서 재초기화 불필요)
-      distSensor.startContinuous(50);
-      delay(200);
-
-      lastRecognitionTime = millis();  // 쿨다운 시작
-
-      // 결과 표시
-      Serial.println(">>> Final result: " + result);
-      onRecognitionResult(result);
-
-      oledShowLine(0, "");
-      char nameBuf[17];
-      strncpy(nameBuf, result.c_str(), 16);
-      nameBuf[16] = '\0';
-      oledShowLine(2, nameBuf);
-    }
-  } else {
-    // === 물체 없음 ===
-    detectConfirmCount = 0;  // 연속 감지 끊김 → 카운터 리셋
-    if (objectDetected) {
-      objectDetected = false;
-      Serial.printf(">>> Cleared at %dmm\n", distance);
-      oledShowLine(0, "Ready");
+      if (objectDetected) {
+        objectDetected = false;
+        Serial.printf(">>> Cleared at %dmm\n", distance);
+        oledShowLine(0, "Ready");
+        oledShowLine(2, "");
+      }
     }
   }
 

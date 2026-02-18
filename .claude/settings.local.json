@@ -1,7 +1,15 @@
 {
   "permissions": {
     "allow": [
-      "Bash(git -C \"/c/Users/zmflt/OneDrive/문서/카카오톡 받은 파일/XIAO_mechanum\" log --oneline -10)"
+      "Bash(git -C \"/c/Users/zmflt/OneDrive/문서/카카오톡 받은 파일/XIAO_mechanum\" log --oneline -10)",
+      "Bash(git remote add:*)",
+      "Bash(git push:*)",
+      "Bash(git -C \"C:\\\\Users\\\\zmflt\\\\OneDrive\\\\문서\\\\카카오톡 받은 파일\\\\XIAO_mechanum\" log --oneline -10)",
+      "WebSearch",
+      "Bash(npm install:*)",
+      "Bash(ipconfig:*)",
+      "Bash(powershell -Command \"Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.InterfaceAlias -notmatch ''Loopback'' } | Select-Object InterfaceAlias, IPAddress | Format-Table -AutoSize\")",
+      "Bash(powershell -Command:*)"
     ]
   }
 }
